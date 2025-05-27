@@ -40,8 +40,10 @@ impl Hmm {
     pub fn new(n_features: usize, n_states: usize, n_obs: usize) -> Self {
         let init_probs: Array1<f64> = Array1::ones(n_states) / n_states as f64;
         let init_probs = init_probs.mapv(|p| p.ln());
+
         let transition_probs: Array2<f64> = Array2::ones((n_states, n_states)) / n_states as f64;
         let transition_probs = transition_probs.mapv(|p| p.ln());
+
         let emission_means: Array1<f64> = Array1::from_vec(vec![20.0, 50.0, 85.0]);
         let emission_means = emission_means.iter().map(|p| p.ln()).collect::<Array1<_>>();
 
@@ -60,6 +62,17 @@ impl Hmm {
             emission_variance,
             hidden_states,
         }
+    }
+
+    pub fn print_model_params(&self) {
+        println!("Number of hidden states: {:?}", self.n_states);
+        println!("Initial probabilities for states: {:?}", self.init_probs);
+        println!(
+            "Initial transition probabilities: {:?}",
+            self.transition_probs
+        );
+        println!("Initial emission means: {:?}", self.emission_means);
+        println!("Initial emission variances: {:?}", self.emission_variance);
     }
 
     /// Gibbs Sampling

@@ -36,8 +36,7 @@ fn main() -> Result<()> {
     let observations = Array2::from_shape_vec((observations.len(), 1), observations)?;
     let n_obs = observations.nrows();
     let mut hmm = Hmm::new(n_features, n_states, n_obs);
-    let (transition_samples, emission_means_samples, emission_variances_samples) =
-        hmm.learn_gibbs_sampling(&observations, NUM_ITER, BURN_IN)?;
+    hmm.learn_gibbs_sampling(&observations, NUM_ITER, BURN_IN)?;
 
     // check anomalies
     let scores = hmm.anomalies(&input_data)?;
