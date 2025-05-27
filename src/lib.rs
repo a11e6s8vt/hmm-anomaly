@@ -6,7 +6,7 @@ use std::usize;
 pub use crate::io::*;
 
 use anyhow::Result;
-use nalgebra::{DMatrix, DVector};
+use chrono::NaiveDateTime;
 use ndarray::{Array1, Array2, Axis};
 use rand::Rng;
 use rand_distr::{Dirichlet, Distribution, Gamma, Normal};
@@ -262,38 +262,15 @@ impl Hmm {
         Ok(())
     }
 
-    pub fn anomalies(&self, observations: &Array2<f64>) {
-        // let emission_means = self
-        //     .emission_means
-        //     .iter()
-        //     .map(|x| x.exp())
-        //     .collect::<Vec<f64>>();
-        // let emission_variance = self
-        //     .emission_variance
-        //     .iter()
-        //     .map(|x| x.exp().clamp(1e-6, 1e3))
-        //     .collect::<Vec<f64>>();
-        // let scores = observations
-        //     .iter()
-        //     .map(|x| {
-        //         println!("Example obs: {:?}", &x);
-        //         let x_log = if *x > 0.0 { x.ln() } else { f64::NEG_INFINITY };
-        //         let likelihoods: Vec<f64> = self
-        //             .emission_means
-        //             .iter()
-        //             .zip(self.emission_variance.iter())
-        //             .map(|(&mu, &var)| {
-        //                 let std = var.sqrt().max(1e-6);
-        //                 let dist = StatNormal::new(mu, std).unwrap();
-        //                 dist.ln_pdf(x_log)
-        //             })
-        //             .collect();
-        //         -likelihoods.iter().copied().fold(f64::INFINITY, f64::max) // Anomaly score
-        //     })
-        //     .collect::<Vec<_>>();
-        // println!("{:?}", scores);
-        for (i, x) in observations.iter().enumerate() {
-            let x_log = x.ln();
+    pub fn anomalies(
+        &self,
+        test_data: &TrainingData<CpuUtilizationEntry>,
+    ) -> anyhow::Result<Vec<(String, f64, f64)>> {
+        let mut scores: Vec<(String, f64, f64)> = Vec::new();
+        for (i, x) in test_data.records.iter().enumerate() {
+            let time = x.time.clone();
+            let data = x.utilization;
+            let data_log = data.ln();
             let log_likelihoods: Vec<f64> = self
                 .emission_means
                 .iter()
@@ -301,7 +278,7 @@ impl Hmm {
                 .map(|(&mu, &var)| {
                     let std = var.sqrt().max(1e-6);
                     let dist = StatNormal::new(mu, std).unwrap();
-                    dist.ln_pdf(x_log)
+                    dist.ln_pdf(data_log)
                 })
                 .collect();
 
@@ -309,115 +286,41 @@ impl Hmm {
                 .iter()
                 .copied()
                 .fold(f64::NEG_INFINITY, f64::max);
+            // - A low score (e.g. -0.64) → normal
+            // - A higher score (e.g. closer to 0) → possibly anomalous
+            // - a score like -0.05 or higher = a rare point = more anomalous
+            // println!(
+            //     "{:?} {:.2}, log = {:.2}, log_likes = {:?}, score = {:.2}",
+            //     time, data, data_log, log_likelihoods, score
+            // );
+            // let time = NaiveDateTime::parse_from_str(&time, "%Y-%m-%d %H:%M:%S")?;
+            scores.push((time, data, score));
+        }
 
-            println!(
-                "obs[{}] = {:.2}, log = {:.2}, log_likes = {:?}, score = {:.2}",
-                i, x, x_log, log_likelihoods, score
-            );
+        let threshold_warn = 5.0;
+        let threshold_crit = 8.0;
+
+        for (i, (time, data, score)) in scores.iter().enumerate() {
+            if *score > threshold_warn {
+                println!(
+                    "Anomaly at {}: data = {:.2}, score = {:.2}",
+                    time, data, score
+                );
+            }
+        }
+
+        for (i, (time, data, score)) in scores.iter().enumerate() {
+            if *score > threshold_crit {
+                println!(
+                    "Anomaly at {}: data = {:.2}, score = {:.2}",
+                    time, data, score
+                );
+            }
         }
         println!("{:?}", self.emission_variance);
         println!("{:?}", self.emission_means);
+        Ok(scores)
     }
-}
-
-pub fn compute_anomaly_score(
-    observations: &Array2<f64>,
-    n_states: usize,
-    transition_probs_samples: Vec<Array2<f64>>,
-    emission_means_samples: Vec<Array1<f64>>,
-    emission_variance_samples: Vec<Array1<f64>>,
-    burn_in: usize,
-) -> Result<f64> {
-    let num_transition_samples = transition_probs_samples.len() - burn_in;
-    let mut log_probs: Vec<f64> = Vec::new();
-    for i in burn_in..num_transition_samples {
-        let prob = log_likelihood(
-            observations,
-            n_states,
-            &transition_probs_samples[i],
-            &emission_means_samples[i],
-            &emission_variance_samples[i],
-        )?;
-        println!("prob = {:?}", prob);
-        log_probs.push(prob);
-    }
-    let max_log_prob = log_probs.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-    let sum_exp: f64 = log_probs.iter().map(|&lp| (lp - max_log_prob).exp()).sum();
-    Ok(max_log_prob + sum_exp.ln() - (num_transition_samples as f64).ln())
-}
-
-// Forward Algorithm
-// TODO: remove duplicate code
-fn log_likelihood(
-    observations: &Array2<f64>,
-    n_states: usize,
-    transition_probs: &Array2<f64>,
-    emission_means: &Array1<f64>,
-    emission_variance: &Array1<f64>,
-) -> Result<f64> {
-    // Forward-Backward Algorithm
-    //  - used for inferencing P(z_k|x_1:num_obs)
-    let n_obs = observations.nrows();
-    let mut rng = rand::rng();
-
-    let init_probs: Array1<f64> = Array1::ones(n_states) / n_states as f64;
-    let init_probs = init_probs.mapv(|p| p.ln());
-    // Forward Step
-    //
-    // alpha_t(i) = probability of seeing observations x_1,...,x_t and ending at state q_t = S_i
-    let mut alpha: Array2<f64> = Array2::zeros((n_obs, n_states));
-
-    //
-    // Base Case, t = 0
-    //
-    let row = observations.row(0);
-    for k in 0..n_states {
-        // assuming random variable X has only a single value at time step t
-        let mu = &emission_means[k];
-        let sigma = &emission_variance[k];
-        let normal = StatNormal::new(*mu, sigma.sqrt())?;
-        let log_likelihood = normal.ln_pdf(row[0]);
-        // let likelihood = gaussian_pdf(&row.to_owned(), mu, sigma);
-        alpha[[0, k]] = init_probs[k] + log_likelihood;
-    }
-
-    // Normalise alpha
-    // let row_sum = alpha.row(0).sum();
-    // let mut row = alpha.row_mut(0);
-    // row.mapv_inplace(|x| x / row_sum);
-    let row = alpha.row(0);
-    let row = normalize_log_probs(&row.to_owned());
-    alpha.index_axis_mut(Axis(0), 0).assign(&row);
-
-    //
-    // Inductive Step (t = 1..n_obs)
-    //
-    for t in 1..n_obs {
-        for k in 0..n_states {
-            let row = observations.row(t);
-            let mu = &emission_means[k];
-            let sigma = &emission_variance[k];
-            // let likelihood = gaussian_pdf(&row.to_owned(), mu, sigma);
-            let normal = StatNormal::new(*mu, sigma.sqrt())?;
-            let log_likelihood = normal.ln_pdf(row[0]); // assuming random variable X has only a
-                                                        // single value at time step t
-            let mut temp = Array1::<f64>::zeros(n_states);
-            for prev_state in 0..n_states {
-                temp[prev_state] = alpha[[t - 1, prev_state]] + transition_probs[[prev_state, k]];
-            }
-            alpha[[t, k]] = log_sum_exp(&temp) + log_likelihood;
-        }
-
-        // Normalise alpha
-        // let row_sum = alpha.row(t).sum();
-        // let mut row = alpha.row_mut(t);
-        // row.mapv_inplace(|x| x / row_sum);
-        let row = alpha.row(t);
-        let row = normalize_log_probs(&row.to_owned());
-        alpha.index_axis_mut(Axis(0), t).assign(&row);
-    }
-
-    Ok(alpha.row(n_obs - 1).iter().sum::<f64>())
 }
 
 fn log_sum_exp(log_probs: &ndarray::Array1<f64>) -> f64 {
