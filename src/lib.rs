@@ -317,8 +317,6 @@ impl Hmm {
                 );
             }
         }
-        println!("{:?}", self.emission_variance);
-        println!("{:?}", self.emission_means);
         Ok(scores)
     }
 }

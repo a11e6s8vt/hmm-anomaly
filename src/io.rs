@@ -145,7 +145,6 @@ pub fn plot_anomalies(scores: Vec<(String, f64, f64)>, score_threshold: f64) -> 
         let time: DateTime<Utc> =
             DateTime::parse_from_str(&format!("{} +0000", t), &format!("{} %z", format))?
                 .with_timezone(&Utc);
-        println!("{:?} {:?}", time, val);
         graph_points.push((time, *val));
     }
     ctx.draw_series(LineSeries::new(graph_points, &BLUE))

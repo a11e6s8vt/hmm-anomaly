@@ -3,7 +3,7 @@ use hmm_anomaly::{plot_anomalies, CliInputs, CpuUtilizationEntry, CsvReader, Hmm
 use ndarray::Array2;
 
 // No of iterations in the gibbs_sampling
-const NUM_ITER: usize = 500;
+const NUM_ITER: usize = 1000;
 const BURN_IN: usize = 50;
 
 fn main() -> Result<()> {
@@ -41,15 +41,6 @@ fn main() -> Result<()> {
 
     // check anomalies
     let scores = hmm.anomalies(&input_data)?;
-    // let score = compute_anomaly_score(
-    //     &test_input,
-    //     n_states,
-    //     transition_samples,
-    //     emission_means_samples,
-    //     emission_variances_samples,
-    //     BURN_IN,
-    // )?;
-    // println!("Anomaly score: {}", score);
     plot_anomalies(scores, 8.0)?;
 
     Ok(())
