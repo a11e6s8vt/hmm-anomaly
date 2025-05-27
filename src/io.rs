@@ -20,11 +20,6 @@ pub struct CliInputs {
     input_data: Option<PathBuf>,
 }
 
-const DATA: [f64; 14] = [
-    137.24, 136.37, 138.43, 137.41, 139.69, 140.41, 141.58, 139.55, 139.68, 139.10, 138.24, 135.67,
-    137.12, 138.12,
-];
-
 impl CliInputs {
     pub fn read_cli() -> Result<(PathBuf, PathBuf)> {
         let cli_inputs = CliInputs::parse();
@@ -128,11 +123,22 @@ pub fn plot_anomalies(scores: Vec<(String, f64, f64)>, score_threshold: f64) -> 
     let mut ctx = ChartBuilder::on(&root)
         .set_label_area_size(LabelAreaPosition::Left, 40)
         .set_label_area_size(LabelAreaPosition::Bottom, 40)
-        .caption("MSFT daily close price", ("sans-serif", 40))
+        .caption("CPU Utilization with Anomalies", ("sans-serif", 40))
         .build_cartesian_2d(start_time..end_time, 0.0..100.0)
         .unwrap();
 
-    ctx.configure_mesh().draw().unwrap();
+    ctx.configure_mesh()
+        .x_labels(40)
+        .x_label_formatter(&|dt| format!("{}", dt.format("%m-%d %H")))
+        .x_label_style(
+            ("sans-serif", 15)
+                .into_font()
+                .transform(FontTransform::Rotate270),
+        )
+        .y_desc("CPU Usage")
+        .x_desc("Time")
+        .draw()
+        .unwrap();
 
     let mut graph_points: Vec<_> = Vec::new();
     for (t, val, score) in scores.iter() {
@@ -144,6 +150,25 @@ pub fn plot_anomalies(scores: Vec<(String, f64, f64)>, score_threshold: f64) -> 
     }
     ctx.draw_series(LineSeries::new(graph_points, &BLUE))
         .unwrap();
+
+    let mut anomaly_points: Vec<(DateTime<Utc>, f64)> = Vec::new();
+
+    for (t, val, score) in scores.iter() {
+        if score >= &score_threshold {
+            let time: DateTime<Utc> =
+                DateTime::parse_from_str(&format!("{} +0000", t), &format!("{} %z", format))?
+                    .with_timezone(&Utc);
+            anomaly_points.push((time, *val));
+        } else {
+            continue;
+        }
+    }
+
+    ctx.draw_series(
+        anomaly_points
+            .iter()
+            .map(|&(x, y)| Circle::new((x, y), 1.2, RED.filled())),
+    )?;
 
     Ok(())
 }
