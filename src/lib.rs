@@ -87,14 +87,13 @@ impl Hmm {
             self.sample_transition_probs(&states);
             self.sample_emission_params(observations, &states)?;
             if index >= burn_in {
-                println!("{:?}", self.transition_probs);
                 transition_probs_samples.push(self.transition_probs.to_owned());
                 emission_means_samples.push(self.emission_means.to_owned());
                 emission_variances_samples.push(self.emission_variance.to_owned());
                 latent_states.push(states);
             }
         }
-        println!("t count = {:?}", transition_probs_samples);
+
         Ok((
             transition_probs_samples,
             emission_means_samples,
@@ -218,8 +217,8 @@ impl Hmm {
 
         let mut rng = rand::rng();
         let nig_prior_mean = 0.0;
+        let nig_prior_variance_scale = 20.0;
         let nig_prior_variance_shape = 1.0;
-        let nig_prior_variance_scale = 1.0;
 
         // Group observations by state {0: Normal, 1: Warn, 2: Critical}
         for state in 0..self.n_states {
@@ -238,7 +237,7 @@ impl Hmm {
             // update emission means
             let count_obs = obs_group_by_state.len() as f64;
             let prior_precision = 1.0 / nig_prior_variance_scale;
-            let obs_mean: f64 = obs_group_by_state.iter().sum::<f64>() - count_obs;
+            let obs_mean: f64 = obs_group_by_state.iter().sum::<f64>() / count_obs;
             let updated_precision = count_obs / nig_prior_variance_scale;
             let posterior_mean = (nig_prior_mean / nig_prior_variance_scale + obs_mean * count_obs)
                 / (1.0 / nig_prior_variance_scale + count_obs);
@@ -257,10 +256,67 @@ impl Hmm {
             let posterior_shape = nig_prior_variance_shape + count_obs / 2.0;
             let posterior_scale = nig_prior_variance_scale + 0.5 * sq_dev_sum;
             let inv_gamma = Gamma::new(posterior_shape, 1.0 / posterior_scale)?;
-            self.emission_variance[state] = 1.0 / inv_gamma.sample(&mut rng);
+            self.emission_variance[state] = 1.0 / inv_gamma.sample(&mut rng).clamp(1e-6, 1e2);
         }
 
         Ok(())
+    }
+
+    pub fn anomalies(&self, observations: &Array2<f64>) {
+        // let emission_means = self
+        //     .emission_means
+        //     .iter()
+        //     .map(|x| x.exp())
+        //     .collect::<Vec<f64>>();
+        // let emission_variance = self
+        //     .emission_variance
+        //     .iter()
+        //     .map(|x| x.exp().clamp(1e-6, 1e3))
+        //     .collect::<Vec<f64>>();
+        // let scores = observations
+        //     .iter()
+        //     .map(|x| {
+        //         println!("Example obs: {:?}", &x);
+        //         let x_log = if *x > 0.0 { x.ln() } else { f64::NEG_INFINITY };
+        //         let likelihoods: Vec<f64> = self
+        //             .emission_means
+        //             .iter()
+        //             .zip(self.emission_variance.iter())
+        //             .map(|(&mu, &var)| {
+        //                 let std = var.sqrt().max(1e-6);
+        //                 let dist = StatNormal::new(mu, std).unwrap();
+        //                 dist.ln_pdf(x_log)
+        //             })
+        //             .collect();
+        //         -likelihoods.iter().copied().fold(f64::INFINITY, f64::max) // Anomaly score
+        //     })
+        //     .collect::<Vec<_>>();
+        // println!("{:?}", scores);
+        for (i, x) in observations.iter().enumerate() {
+            let x_log = x.ln();
+            let log_likelihoods: Vec<f64> = self
+                .emission_means
+                .iter()
+                .zip(self.emission_variance.iter())
+                .map(|(&mu, &var)| {
+                    let std = var.sqrt().max(1e-6);
+                    let dist = StatNormal::new(mu, std).unwrap();
+                    dist.ln_pdf(x_log)
+                })
+                .collect();
+
+            let score = -log_likelihoods
+                .iter()
+                .copied()
+                .fold(f64::NEG_INFINITY, f64::max);
+
+            println!(
+                "obs[{}] = {:.2}, log = {:.2}, log_likes = {:?}, score = {:.2}",
+                i, x, x_log, log_likelihoods, score
+            );
+        }
+        println!("{:?}", self.emission_variance);
+        println!("{:?}", self.emission_means);
     }
 }
 
@@ -272,9 +328,7 @@ pub fn compute_anomaly_score(
     emission_variance_samples: Vec<Array1<f64>>,
     burn_in: usize,
 ) -> Result<f64> {
-    println!("{:?}", transition_probs_samples.len());
     let num_transition_samples = transition_probs_samples.len() - burn_in;
-    println!("{:?}", num_transition_samples);
     let mut log_probs: Vec<f64> = Vec::new();
     for i in burn_in..num_transition_samples {
         let prob = log_likelihood(
