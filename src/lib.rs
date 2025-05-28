@@ -1,18 +1,27 @@
 pub mod io;
 
-use core::f64;
-use std::usize;
-
 pub use crate::io::*;
 
-use anyhow::Result;
-use chrono::NaiveDateTime;
 use ndarray::{Array1, Array2, Axis};
-use rand::Rng;
 use rand_distr::{Dirichlet, Distribution, Gamma, Normal};
 use statrs::distribution::{Continuous, Normal as StatNormal};
 
-type GibbsSampler = Result<(Vec<Array2<f64>>, Vec<Array1<f64>>, Vec<Array1<f64>>)>;
+trait GibbsSampler {
+    fn sample_latent_states(&mut self, observations: &Array2<f64>) -> anyhow::Result<Vec<usize>>;
+    fn sample_transition_probs(&mut self, states: &[usize]);
+    fn sample_emission_params(
+        &mut self,
+        observations: &Array2<f64>,
+        states: &[usize],
+    ) -> anyhow::Result<()>;
+}
+
+pub trait AnalyticsEngine {
+    fn anomalies(
+        &self,
+        test_data: &TrainingData<CpuUtilizationEntry>,
+    ) -> anyhow::Result<Vec<(String, f64, f64)>>;
+}
 
 #[derive(Debug)]
 pub struct Hmm {
@@ -31,9 +40,8 @@ pub struct Hmm {
     // C (sigma_k)
     // Diagonal Covariance (Uncorrelated emissions)
     emission_variance: Array1<f64>,
-
     // z_t
-    hidden_states: Vec<usize>,
+    // hidden_states: Vec<usize>,
 }
 
 impl Hmm {
@@ -52,7 +60,7 @@ impl Hmm {
             .iter()
             .map(|p| p.ln())
             .collect::<Array1<_>>();
-        let hidden_states = vec![0; n_obs];
+        // let hidden_states = vec![0; n_obs];
 
         Self {
             n_states,
@@ -60,7 +68,7 @@ impl Hmm {
             transition_probs,
             emission_means,
             emission_variance,
-            hidden_states,
+            // hidden_states,
         }
     }
 
@@ -88,7 +96,7 @@ impl Hmm {
         observations: &Array2<f64>,
         num_iter: usize,
         burn_in: usize,
-    ) -> GibbsSampler {
+    ) -> anyhow::Result<()> {
         let mut transition_probs_samples: Vec<Array2<f64>> = Vec::new();
         let mut emission_means_samples: Vec<Array1<f64>> = Vec::new();
         let mut emission_variances_samples: Vec<Array1<f64>> = Vec::new();
@@ -107,13 +115,11 @@ impl Hmm {
             }
         }
 
-        Ok((
-            transition_probs_samples,
-            emission_means_samples,
-            emission_variances_samples,
-        ))
+        Ok(())
     }
+}
 
+impl GibbsSampler for Hmm {
     fn sample_latent_states(&mut self, observations: &Array2<f64>) -> anyhow::Result<Vec<usize>> {
         /*
          * Sample hidden states
@@ -274,8 +280,10 @@ impl Hmm {
 
         Ok(())
     }
+}
 
-    pub fn anomalies(
+impl AnalyticsEngine for Hmm {
+    fn anomalies(
         &self,
         test_data: &TrainingData<CpuUtilizationEntry>,
     ) -> anyhow::Result<Vec<(String, f64, f64)>> {
