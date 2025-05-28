@@ -1,5 +1,6 @@
 use anyhow::Result;
 use hmm_anomaly::AnalyticsEngine;
+use hmm_anomaly::Bayesian;
 use hmm_anomaly::{plot_anomalies, CliInputs, CpuUtilizationEntry, CsvReader, Hmm, TrainingData};
 use ndarray::Array2;
 

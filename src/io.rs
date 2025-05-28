@@ -1,13 +1,11 @@
 use anyhow::{anyhow, Result};
-use chrono::{DateTime, Duration, NaiveDateTime};
-use chrono::{TimeZone, Utc};
+use chrono::DateTime;
+use chrono::Utc;
 use clap::{command, CommandFactory, Parser};
 use csv::Reader;
-use plotters::element::CoordMapper;
 use plotters::prelude::*;
 use serde::Deserialize;
 use std::path::PathBuf;
-use std::str::FromStr;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
