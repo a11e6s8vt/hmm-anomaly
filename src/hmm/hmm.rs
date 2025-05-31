@@ -1,7 +1,7 @@
 use crate::traits::{AnalyticsEngine, Bayesian, GibbsSampler};
 use crate::utils::{log_sum_exp, normalize_log_probs};
-use crate::CpuUtilizationEntry;
-use crate::TrainingData;
+use crate::Metric;
+use crate::MetricEntry;
 use ndarray::{Array1, Array2, Axis};
 use rand_distr::{Dirichlet, Distribution, Gamma, Normal};
 use statrs::distribution::{Continuous, Normal as StatNormal};
@@ -270,12 +270,12 @@ impl GibbsSampler for Hmm {
 impl AnalyticsEngine for Hmm {
     fn anomalies(
         &self,
-        test_data: &TrainingData<CpuUtilizationEntry>,
+        test_data: &Metric<MetricEntry>,
     ) -> anyhow::Result<Vec<(String, f64, f64)>> {
         let mut scores: Vec<(String, f64, f64)> = Vec::new();
         for (i, x) in test_data.records.iter().enumerate() {
             let time = x.time.clone();
-            let data = x.utilization;
+            let data = x.data;
             let data_log = data.ln();
             let log_likelihoods: Vec<f64> = self
                 .emission_means

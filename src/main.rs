@@ -1,48 +1,49 @@
 use anyhow::Result;
-use hmm_anomaly::AnalyticsEngine;
-use hmm_anomaly::Bayesian;
-use hmm_anomaly::{plot_anomalies, CliInputs, CpuUtilizationEntry, CsvReader, Hmm, TrainingData};
-use ndarray::Array2;
+use hmm_anomaly::{HmmServer, ServerCommand};
+use std::sync::Arc;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+};
 
-// No of iterations in the gibbs_sampling
-const NUM_ITER: usize = 1000;
-const BURN_IN: usize = 50;
+#[tokio::main]
+async fn main() -> Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:8080").await?;
+    let server = Arc::new(HmmServer::default());
 
-fn main() -> Result<()> {
-    // This specific example tries to spot the anomalies in a cpu utilization metric data.
-    // We categorise the cpu utilization data as below:
-    // Three State: 0 = Normal (0% - 30%), 1 = Warn (30% - 60%), 2 = Critical (>= 60%)
-    let n_states = 3usize;
-    // No of features in the dataset - only one field in the dataset, the cpu utilization percent
-    let n_features: usize = 1;
-    let (training_data_file, input_data_file) = CliInputs::read_cli()?;
+    println!("Server listening on 127.0.0.1:8080");
 
-    // INPUT FILE
-    let mut input_data: TrainingData<CpuUtilizationEntry> = TrainingData::default();
-    let _ = input_data.read_csv(input_data_file);
-    let test_input = input_data
-        .records
-        .iter()
-        .map(|x| x.utilization)
-        .collect::<Vec<_>>();
-    let test_input = Array2::from_shape_vec((test_input.len(), 1), test_input)?;
+    loop {
+        let (socket, _) = listener.accept().await?;
+        let server = server.clone();
 
-    // TRAINING FILE
-    let mut train_data: TrainingData<CpuUtilizationEntry> = TrainingData::default();
-    let _ = train_data.read_csv(training_data_file);
-    let observations = train_data
-        .records
-        .iter()
-        .map(|x| x.utilization)
-        .collect::<Vec<_>>();
-    let observations = Array2::from_shape_vec((observations.len(), 1), observations)?;
-    let n_obs = observations.nrows();
-    let mut hmm = Hmm::new(n_features, n_states, n_obs);
-    hmm.learn_gibbs_sampling(&observations, NUM_ITER, BURN_IN)?;
+        tokio::spawn(async move {
+            if let Err(e) = handle_connection(socket, server).await {
+                eprintln!("Error handling connection: {}", e);
+            }
+        });
+    }
+}
 
-    // check anomalies
-    let scores = hmm.anomalies(&input_data)?;
-    plot_anomalies(scores, 8.0)?;
+async fn handle_connection(mut stream: TcpStream, server: Arc<HmmServer>) -> anyhow::Result<()> {
+    // Read command length
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf).await?;
+    let len = u32::from_be_bytes(len_buf);
+
+    // Read command
+    let mut cmd_buf = vec![0u8; len as usize];
+    stream.read_exact(&mut cmd_buf).await?;
+    let command: ServerCommand = serde_json::from_slice(&cmd_buf)?;
+
+    // Process command
+    let response = server.handle_command(command).await;
+
+    // Send response
+    let resp_json = serde_json::to_string(&response)?;
+    let len = resp_json.len() as u32;
+    stream.write_all(&len.to_be_bytes()).await?;
+    stream.write_all(resp_json.as_bytes()).await?;
 
     Ok(())
 }

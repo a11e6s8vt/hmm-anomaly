@@ -1,5 +1,4 @@
-use crate::CpuUtilizationEntry;
-use crate::TrainingData;
+use crate::{Metric, MetricEntry};
 use ndarray::Array2;
 
 pub trait GibbsSampler {
@@ -30,8 +29,6 @@ pub trait Bayesian: GibbsSampler {
 }
 
 pub trait AnalyticsEngine {
-    fn anomalies(
-        &self,
-        test_data: &TrainingData<CpuUtilizationEntry>,
-    ) -> anyhow::Result<Vec<(String, f64, f64)>>;
+    fn anomalies(&self, test_data: &Metric<MetricEntry>)
+        -> anyhow::Result<Vec<(String, f64, f64)>>;
 }

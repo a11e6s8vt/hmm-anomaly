@@ -6,14 +6,25 @@ edition = "2021"
 [dependencies]
 anyhow = { version = "1", default-features = false }
 clap = { version = "4.5.20", default-features = false, features = ["std", "derive"] }
+chrono = "0.4.41"
 csv = "1.3.1"
+home = "0.5.11"
 nalgebra = "0.33.2"
 ndarray = "0.16.1"
+plotters = "0.3.7"
+polars = { version = "0.48", features = ["full"] }
+rand_distr = "0.5.1"
 rand = "0.9.1"
 statrs = "0.18.0"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = { version = "1.0.140" }
-rand_distr = "0.5.1"
-plotters = "0.3.7"
-chrono = "0.4.41"
-home = "0.5.11"
+tokio = { version = "1.45", features = ["full"] }
+walkdir = "2.5.0"
+
+[[bin]]
+name = "server"
+path = "src/main.rs"
+
+[[bin]]
+name = "client"
+path = "src/client.rs"
