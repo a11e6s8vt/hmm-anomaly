@@ -108,7 +108,7 @@ pub async fn read_input_data(path: &StdPath) -> anyhow::Result<DataFrame> {
     Ok(df)
 }
 
-pub fn plot_anomalies(scores: Vec<(String, f64, f64)>, score_threshold: f64) -> anyhow::Result<()> {
+pub fn plot_anomalies(scores: &[(String, f64, f64)], score_threshold: f64) -> anyhow::Result<()> {
     let home = match std::env::var("HOME") {
         Ok(path) => path,
         Err(e) => return Err(anyhow!("Getting path information failed!")),

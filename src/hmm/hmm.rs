@@ -3,6 +3,7 @@ use crate::utils::{log_sum_exp, normalize_log_probs};
 use crate::Metric;
 use crate::MetricEntry;
 use ndarray::{Array1, Array2, Axis};
+use polars::frame::DataFrame;
 use rand_distr::{Dirichlet, Distribution, Gamma, Normal};
 use statrs::distribution::{Continuous, Normal as StatNormal};
 
@@ -28,7 +29,7 @@ pub struct Hmm {
 }
 
 impl Hmm {
-    pub fn new(n_features: usize, n_states: usize, n_obs: usize) -> Self {
+    pub fn new(n_features: usize, n_states: usize) -> Self {
         let init_probs: Array1<f64> = Array1::ones(n_states) / n_states as f64;
         let init_probs = init_probs.mapv(|p| p.ln());
 
@@ -268,14 +269,16 @@ impl GibbsSampler for Hmm {
 }
 
 impl AnalyticsEngine for Hmm {
-    fn anomalies(
-        &self,
-        test_data: &Metric<MetricEntry>,
-    ) -> anyhow::Result<Vec<(String, f64, f64)>> {
+    fn anomaly_scores(&self, test_data: &DataFrame) -> anyhow::Result<Vec<(String, f64, f64)>> {
         let mut scores: Vec<(String, f64, f64)> = Vec::new();
-        for (i, x) in test_data.records.iter().enumerate() {
-            let time = x.time.clone();
-            let data = x.data;
+        let columns = test_data.get_columns();
+        let timestamps = columns[0].clone();
+        let timestamps = timestamps.str().unwrap();
+        let observations = columns[1].clone();
+        let observations = observations.f64().unwrap();
+        for (i, (time, data)) in timestamps.iter().zip(observations.iter()).enumerate() {
+            let time = time.unwrap();
+            let data = data.unwrap();
             let data_log = data.ln();
             let log_likelihoods: Vec<f64> = self
                 .emission_means
@@ -299,8 +302,7 @@ impl AnalyticsEngine for Hmm {
             //     "{:?} {:.2}, log = {:.2}, log_likes = {:?}, score = {:.2}",
             //     time, data, data_log, log_likelihoods, score
             // );
-            // let time = NaiveDateTime::parse_from_str(&time, "%Y-%m-%d %H:%M:%S")?;
-            scores.push((time, data, score));
+            scores.push((time.to_string(), data, score));
         }
 
         let threshold_warn = 5.0;

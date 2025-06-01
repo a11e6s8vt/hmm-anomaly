@@ -1,5 +1,6 @@
 use crate::{Metric, MetricEntry};
 use ndarray::Array2;
+use polars::frame::DataFrame;
 
 pub trait GibbsSampler {
     fn sample_latent_states(&mut self, observations: &Array2<f64>) -> anyhow::Result<Vec<usize>>;
@@ -29,6 +30,5 @@ pub trait Bayesian: GibbsSampler {
 }
 
 pub trait AnalyticsEngine {
-    fn anomalies(&self, test_data: &Metric<MetricEntry>)
-        -> anyhow::Result<Vec<(String, f64, f64)>>;
+    fn anomaly_scores(&self, test_data: &DataFrame) -> anyhow::Result<Vec<(String, f64, f64)>>;
 }

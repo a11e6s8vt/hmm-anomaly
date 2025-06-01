@@ -37,7 +37,7 @@ async fn handle_connection(mut stream: TcpStream, server: Arc<HmmServer>) -> any
     let command: ServerCommand = serde_json::from_slice(&cmd_buf)?;
 
     // Process command
-    let response = server.handle_command(command).await;
+    let response = server.handle_command(command).await?;
 
     // Send response
     let resp_json = serde_json::to_string(&response)?;

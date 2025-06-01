@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use csv::Reader;
 use hmm_anomaly::{is_csv_by_content, read_input_data, ServerCommand, ServerResponse};
+use ndarray::Array2;
 use serde_json;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -28,17 +29,28 @@ enum Commands {
         /// Path to CSV file
         file: PathBuf,
     },
-    /*
+    /// List all the training data avaialble
+    ListTraining,
+
+    /// Describe the schema of an training dataset
+    DescTraining {
+        /// Name for this training dataset
+        name: String,
+    },
+
     /// Train an HMM model
     TrainModel {
-        /// Name of the model
-        name: String,
+        /// Name of the model - training data with the same name exists
+        model_name: String,
 
         /// Number of hidden states
-        states: usize,
+        n_states: usize,
 
-        /// Name of training data to use
+        /// Name of the training data set to use
         training_data: String,
+
+        /// Field name
+        field: String,
     },
 
     /// Find anomalies in data
@@ -52,7 +64,7 @@ enum Commands {
         /// Anomaly threshold
         threshold: f64,
     },
-
+    /*
     /// Correlate anomalies across multiple models
     CorrelateAnomalies {
         /// Comma-separated list of model names
@@ -81,41 +93,51 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::UploadTraining { name, file } => {
             // Read CSV file
-
             if !file.is_dir() && is_csv_by_content(&file)? {
                 let data = read_input_data(&file).await?;
-                println!("{:?}", data);
                 let cmd = ServerCommand::UploadTraining { name, data };
                 send_command(&mut stream, cmd).await?;
             } else {
                 eprintln!("Only CSV files are supported");
             }
+        }
+        Commands::ListTraining => send_command(&mut stream, ServerCommand::ListTraining).await?,
+        Commands::DescTraining { name } => {
+            send_command(&mut stream, ServerCommand::DescTraining { name }).await?;
+        }
+        Commands::TrainModel {
+            model_name,
+            n_states,
+            training_data,
+            field,
+        } => {
+            let cmd = ServerCommand::TrainModel {
+                model_name,
+                n_states,
+                training_data,
+                field,
+            };
+            send_command(&mut stream, cmd).await?;
+        }
+        Commands::FindAnomalies {
+            model,
+            file,
+            threshold,
+        } => {
+            if !file.is_dir() && is_csv_by_content(&file)? {
+                let data = read_input_data(&file).await?;
+                // Convert to ndarray format
+                // TODO: Change unwrap()
+                let cmd = ServerCommand::FindAnomalies {
+                    model_name: model,
+                    data,
+                    threshold,
+                };
+                send_command(&mut stream, cmd).await?;
+            } else {
+                eprintln!("Only CSV files are supported");
+            }
         } /*
-          Commands::TrainModel {
-              name,
-              states,
-              training_data,
-          } => {
-              let cmd = ServerCommand::TrainModel {
-                  name,
-                  states,
-                  training_data,
-              };
-              send_command(&mut stream, cmd).await?;
-          }
-          Commands::FindAnomalies {
-              model,
-              file,
-              threshold,
-          } => {
-              let data = read_csv_file(&file)?;
-              let cmd = ServerCommand::FindAnomalies {
-                  model_name: model,
-                  data,
-                  threshold,
-              };
-              send_command(&mut stream, cmd).await?;
-          }
           Commands::CorrelateAnomalies { models, file } => {
               let data = read_csv_file(&file)?;
               let model_names = models.split(',').map(|s| s.trim().to_string()).collect();
@@ -156,10 +178,31 @@ async fn send_command(stream: &mut TcpStream, command: ServerCommand) -> anyhow:
     match response {
         ServerResponse::Success(msg) => println!("Success: {}", msg),
         ServerResponse::Error(err) => eprintln!("Error: {}", err),
+        ServerResponse::TrainingList(training_data) => {
+            println!("List of training data avaialble:");
+            for name in training_data {
+                println!("  {}", name);
+            }
+        }
+        ServerResponse::DescTraining(desc) => {
+            let widths = [15, 15]; // Column widths
+            let separator = "+".to_string()
+                + &"-".repeat(widths[0] + 2)
+                + "+"
+                + &"-".repeat(widths[1] + 2)
+                + "+";
+            println!("{}", separator);
+            println!("| {:<15} | {:<15} |", "Field", "Type");
+            println!("{}", separator);
+            for row in desc {
+                println!("| {:<15} | {:<15} |", row.0, row.1);
+            }
+            println!("{}", separator);
+        }
         ServerResponse::AnomalyResults(anomalies) => {
-            println!("Anomalies found at indices:");
-            for (idx, score) in anomalies {
-                println!("  {}: {:.4}", idx, score);
+            println!("Anomalies found at timestamps:");
+            for (time, obs, score) in anomalies {
+                println!(" {} {} {:.4}", time, obs, score);
             }
         }
         ServerResponse::CorrelationResults(results) => {

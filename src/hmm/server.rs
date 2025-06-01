@@ -1,22 +1,35 @@
-use crate::Hmm;
+use crate::plot_anomalies;
+use crate::{AnalyticsEngine, Hmm};
+use ndarray::Array2;
 use polars::frame::DataFrame;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use super::Bayesian;
+
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ServerCommand {
-    UploadTraining { name: String, data: DataFrame },
-    // TrainModel {
-    //     name: String,
-    //     states: usize,
-    // },
-    // FindAnomalies {
-    //     model_name: String,
-    //     data: Vec<Vec<f64>>,
-    //     threshold: f64,
-    // },
+    UploadTraining {
+        name: String,
+        data: DataFrame,
+    },
+    ListTraining,
+    DescTraining {
+        name: String,
+    },
+    TrainModel {
+        model_name: String,
+        n_states: usize,
+        training_data: String,
+        field: String,
+    },
+    FindAnomalies {
+        model_name: String,
+        data: DataFrame,
+        threshold: f64,
+    },
     // CorrelateAnomalies {
     //     model_names: Vec<String>,
     //     data: Vec<Vec<f64>>,
@@ -30,7 +43,9 @@ pub enum ServerCommand {
 pub enum ServerResponse {
     Success(String),
     Error(String),
-    AnomalyResults(Vec<(usize, f64)>), // (index, anomaly_score)
+    TrainingList(Vec<String>),
+    DescTraining(Vec<(String, String)>),
+    AnomalyResults(Vec<(String, f64, f64)>), // (index, anomaly_score)
     CorrelationResults(Vec<(String, Vec<usize>)>), // (model_name, anomaly_indices)
     ModelInfo(String),
 }
@@ -48,75 +63,110 @@ impl HmmServer {
         }
     }
 
-    pub async fn handle_command(&self, command: ServerCommand) -> ServerResponse {
+    pub async fn handle_command(&self, command: ServerCommand) -> anyhow::Result<ServerResponse> {
         match command {
             ServerCommand::UploadTraining { name, data } => {
                 let mut training_data = self.training_data.lock().await;
                 training_data.insert(name.clone(), data);
-                ServerResponse::Success(format!("Training data '{}' uploaded", name))
-            } // ServerCommand::TrainModel { name, states } => {
-              //     let training_data = self.training_data.lock().await;
-              //     if let Some(data) = training_data.get(&name) {
-              //         // Convert to ndarray format
-              //         let obs = data.len();
-              //         let features = data[0].len();
-              //         let mut observations = Array2::zeros((obs, features));
-              //
-              //         for (i, row) in data.iter().enumerate() {
-              //             for (j, &val) in row.iter().enumerate() {
-              //                 observations[[i, j]] = val;
-              //             }
-              //         }
-              //
-              //         // Train HMM
-              //         let mut hmm = GaussianHMM::new(states, features);
-              //         hmm.fit(&observations, 100).unwrap(); // Add proper error handling
-              //
-              //         // Store model
-              //         let mut models = self.models.lock().await;
-              //         models.insert(name, hmm);
-              //
-              //         ServerResponse::Success(format!(
-              //             "Model '{}' trained with {} states",
-              //             name, states
-              //         ))
-              //     } else {
-              //         ServerResponse::Error(format!("No training data found for '{}'", name))
-              //     }
-              // }
-              // ServerCommand::FindAnomalies {
-              //     model_name,
-              //     data,
-              //     threshold,
-              // } => {
-              //     let models = self.models.lock().await;
-              //     if let Some(model) = models.get(&model_name) {
-              //         // Convert data to ndarray
-              //         let obs = data.len();
-              //         let features = data[0].len();
-              //         let mut observations = Array2::zeros((obs, features));
-              //
-              //         for (i, row) in data.iter().enumerate() {
-              //             for (j, &val) in row.iter().enumerate() {
-              //                 observations[[i, j]] = val;
-              //             }
-              //         }
-              //
-              //         // Find anomalies
-              //         let scores = model.anomaly_scores(&observations);
-              //         let anomalies: Vec<_> = scores
-              //             .iter()
-              //             .enumerate()
-              //             .filter(|(_, &score)| score > threshold)
-              //             .map(|(i, &score)| (i, score))
-              //             .collect();
-              //
-              //         ServerResponse::AnomalyResults(anomalies)
-              //     } else {
-              //         ServerResponse::Error(format!("Model '{}' not found", model_name))
-              //     }
-              // }
-              // ServerCommand::CorrelateAnomalies { model_names, data } => {
+                Ok(ServerResponse::Success(format!(
+                    "Training data '{}' uploaded",
+                    name
+                )))
+            }
+            ServerCommand::ListTraining => {
+                let training_data = self.training_data.lock().await;
+                let l = training_data
+                    .keys()
+                    .map(|x| x.to_string())
+                    .collect::<Vec<String>>();
+                Ok(ServerResponse::TrainingList(l))
+            }
+            ServerCommand::DescTraining { name } => {
+                let training_data = self.training_data.lock().await;
+                if let Some(data) = training_data.get(&name) {
+                    let s = data
+                        .schema()
+                        .iter()
+                        .map(|(n, t)| (n.to_string(), t.to_string()))
+                        .collect::<Vec<(String, String)>>();
+                    Ok(ServerResponse::DescTraining(s))
+                } else {
+                    Ok(ServerResponse::Error(format!(
+                        "Training data, {} not found!",
+                        name
+                    )))
+                }
+            }
+            ServerCommand::TrainModel {
+                model_name,
+                n_states,
+                training_data,
+                field,
+            } => {
+                let training_data_lock = self.training_data.lock().await;
+                if let Some(data) = training_data_lock.get(&training_data) {
+                    // Convert to ndarray format
+                    // TODO: Change unwrap()
+                    let observations = data.column(&field).unwrap().f64().unwrap();
+                    let observations: Vec<f64> = observations.into_no_null_iter().collect();
+                    let observations =
+                        Array2::from_shape_vec((observations.len(), 1), observations)?;
+
+                    // TODO: compute it from number of fields in training_data
+                    let n_features: usize = 1;
+
+                    // TODO: Make it a command line input parameter
+                    // No of iterations in the gibbs_sampling
+                    const NUM_ITER: usize = 1000;
+                    const BURN_IN: usize = 50;
+
+                    // Initialise HMM
+                    let mut hmm = Hmm::new(n_features, n_states);
+
+                    // Train HMM - Gibbs Sampling
+                    hmm.learn_gibbs_sampling(&observations, NUM_ITER, BURN_IN)
+                        .unwrap(); // Add proper error handling
+
+                    // Store model
+                    let mut models = self.models.lock().await;
+                    models.insert(model_name.clone(), hmm);
+
+                    Ok(ServerResponse::Success(format!(
+                        "Model '{}' trained with {} states",
+                        model_name, n_states
+                    )))
+                } else {
+                    Ok(ServerResponse::Error(format!(
+                        "No training data found for '{}'",
+                        model_name
+                    )))
+                }
+            }
+            ServerCommand::FindAnomalies {
+                model_name,
+                data,
+                threshold,
+            } => {
+                let models = self.models.lock().await;
+                if let Some(model) = models.get(&model_name) {
+                    // Find anomalies
+                    let scores = model.anomaly_scores(&data)?;
+                    plot_anomalies(&scores, threshold)?;
+                    let anomalies: Vec<_> = scores
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, (_, _, score))| score > &threshold)
+                        .map(|(_, (time, obs, score))| (time.to_string(), *obs, *score))
+                        .collect();
+
+                    Ok(ServerResponse::AnomalyResults(anomalies))
+                } else {
+                    Ok(ServerResponse::Error(format!(
+                        "Anomaly scores calculations failed using model '{}'",
+                        model_name
+                    )))
+                }
+            } // ServerCommand::CorrelateAnomalies { model_names, data } => {
               //     let models = self.models.lock().await;
               //     let mut results = Vec::new();
               //
