@@ -1,11 +1,26 @@
 use crate::traits::{AnalyticsEngine, Bayesian, GibbsSampler};
 use crate::utils::{log_sum_exp, normalize_log_probs};
-use crate::Metric;
-use crate::MetricEntry;
-use ndarray::{Array1, Array2, Axis};
+use crate::{
+    censored_gamma_samples, normal_samples_above_1, shifted_lognormal, truncated_normal_above_1,
+};
+use ndarray::{array, Array1, Array2, Array3, Axis};
 use polars::frame::DataFrame;
+use polars::prelude::NestedType;
+use rand::rng;
 use rand_distr::{Dirichlet, Distribution, Gamma, Normal};
 use statrs::distribution::{Continuous, Normal as StatNormal};
+
+#[derive(Clone, Debug)]
+pub enum Means {
+    Univariate(Array1<f64>),
+    Multivariate(Array2<f64>),
+}
+
+#[derive(Clone, Debug)]
+pub enum Covariance {
+    Univariate(Array1<f64>),
+    Multivariate(Array3<f64>),
+}
 
 #[derive(Debug)]
 pub struct Hmm {
@@ -19,32 +34,57 @@ pub struct Hmm {
     transition_probs: Array2<f64>,
 
     // B (mu_k)
-    emission_means: Array1<f64>,
+    emission_means: Means,
 
     // C (sigma_k)
     // Diagonal Covariance (Uncorrelated emissions)
-    emission_variance: Array1<f64>,
+    emission_variance: Covariance,
     // z_t
     // hidden_states: Vec<usize>,
 }
 
 impl Hmm {
-    pub fn new(n_features: usize, n_states: usize) -> Self {
+    pub fn new(
+        n_features: usize,
+        n_states: usize,
+        s_mean: f64,
+        s_variance: f64,
+        shape: f64,
+        scale: f64,
+    ) -> Self {
         let init_probs: Array1<f64> = Array1::ones(n_states) / n_states as f64;
         let init_probs = init_probs.mapv(|p| p.ln());
 
         let transition_probs: Array2<f64> = Array2::ones((n_states, n_states)) / n_states as f64;
         let transition_probs = transition_probs.mapv(|p| p.ln());
 
-        let emission_means: Array1<f64> = Array1::from_vec(vec![20.0, 50.0, 85.0]);
-        let emission_means = emission_means.iter().map(|p| p.ln()).collect::<Array1<_>>();
+        let emission_means: Means = if n_features == 1 {
+            let samples: Vec<f64> = shifted_lognormal(s_mean, s_variance.sqrt(), n_states);
+            let emission_means = Array1::from(samples);
+            Means::Univariate(emission_means.iter().map(|p| p.ln()).collect::<Array1<_>>())
+        } else {
+            let emission_means: Array1<f64> = Array1::from_vec(vec![25.0, 25.0, 25.0]);
+            Means::Univariate(emission_means.iter().map(|p| p.ln()).collect::<Array1<_>>())
+        };
 
-        let emission_variance: Array1<f64> = Array1::from_vec(vec![20.0, 20.0, 20.0]);
-        let emission_variance = emission_variance
-            .iter()
-            .map(|p| p.ln())
-            .collect::<Array1<_>>();
-        // let hidden_states = vec![0; n_obs];
+        let emission_variance: Covariance = if n_features == 1 {
+            let samples: Vec<f64> = censored_gamma_samples(shape, scale, n_states);
+            let emission_variance = Array1::from(samples);
+            Covariance::Univariate(
+                emission_variance
+                    .iter()
+                    .map(|p| p.ln())
+                    .collect::<Array1<_>>(),
+            )
+        } else {
+            let emission_variance: Array1<f64> = Array1::from_vec(vec![20.0, 20.0, 20.0]);
+            Covariance::Univariate(
+                emission_variance
+                    .iter()
+                    .map(|p| p.ln())
+                    .collect::<Array1<_>>(),
+            )
+        };
 
         Self {
             n_states,
@@ -84,8 +124,8 @@ impl Bayesian for Hmm {
         burn_in: usize,
     ) -> anyhow::Result<()> {
         let mut transition_probs_samples: Vec<Array2<f64>> = Vec::new();
-        let mut emission_means_samples: Vec<Array1<f64>> = Vec::new();
-        let mut emission_variances_samples: Vec<Array1<f64>> = Vec::new();
+        let mut emission_means_samples: Vec<crate::Means> = Vec::new();
+        let mut emission_variances_samples: Vec<crate::Covariance> = Vec::new();
         let mut latent_states = Vec::new();
 
         println!("num_iter = {}, burn_in = {}", num_iter, burn_in);
@@ -95,8 +135,8 @@ impl Bayesian for Hmm {
             self.sample_emission_params(observations, &states)?;
             if index >= burn_in {
                 transition_probs_samples.push(self.transition_probs.to_owned());
-                emission_means_samples.push(self.emission_means.to_owned());
-                emission_variances_samples.push(self.emission_variance.to_owned());
+                emission_means_samples.push(self.emission_means.clone());
+                emission_variances_samples.push(self.emission_variance.clone());
                 latent_states.push(states);
             }
         }
@@ -127,11 +167,16 @@ impl GibbsSampler for Hmm {
         let row = observations.row(0);
         for k in 0..self.n_states {
             // assuming random variable X has only a single value at time step t
-            let mu = &self.emission_means[k];
-            let sigma = &self.emission_variance[k];
-            let normal = StatNormal::new(*mu, sigma.sqrt())?;
+            let mu = match &self.emission_means {
+                Means::Univariate(arr) => arr[k],
+                Means::Multivariate(arr) => 0.0,
+            };
+            let sigma = match &self.emission_variance {
+                Covariance::Univariate(arr) => arr[k],
+                Covariance::Multivariate(arr) => 0.0,
+            };
+            let normal = StatNormal::new(mu, sigma.sqrt())?;
             let log_likelihood = normal.ln_pdf(row[0]);
-            // let likelihood = gaussian_pdf(&row.to_owned(), mu, sigma);
             alpha[[0, k]] = self.init_probs[k] + log_likelihood;
         }
 
@@ -149,10 +194,15 @@ impl GibbsSampler for Hmm {
         for t in 1..n_obs {
             for k in 0..self.n_states {
                 let row = observations.row(t);
-                let mu = &self.emission_means[k];
-                let sigma = &self.emission_variance[k];
-                // let likelihood = gaussian_pdf(&row.to_owned(), mu, sigma);
-                let normal = StatNormal::new(*mu, sigma.sqrt())?;
+                let mu = match &self.emission_means {
+                    Means::Univariate(arr) => arr[k],
+                    Means::Multivariate(arr) => 0.0,
+                };
+                let sigma = match &self.emission_variance {
+                    Covariance::Univariate(arr) => arr[k],
+                    Covariance::Multivariate(arr) => 0.0,
+                };
+                let normal = StatNormal::new(mu, sigma.sqrt())?;
                 let log_likelihood = normal.ln_pdf(row[0]); // assuming random variable X has only a
                                                             // single value at time step t
                 let mut temp = Array1::<f64>::zeros(self.n_states);
@@ -241,27 +291,37 @@ impl GibbsSampler for Hmm {
 
             // update emission means
             let count_obs = obs_group_by_state.len() as f64;
-            let prior_precision = 1.0 / nig_prior_variance_scale;
             let obs_mean: f64 = obs_group_by_state.iter().sum::<f64>() / count_obs;
-            let updated_precision = count_obs / nig_prior_variance_scale;
             let posterior_mean = (nig_prior_mean / nig_prior_variance_scale + obs_mean * count_obs)
                 / (1.0 / nig_prior_variance_scale + count_obs);
             let posterior_var = 1.0 / (1.0 / nig_prior_variance_scale + count_obs);
             let normal = Normal::new(posterior_mean, posterior_var.sqrt())?;
-            self.emission_means[state] = normal.sample(&mut rng);
+            match self.emission_means {
+                Means::Univariate(ref mut arr) => arr[state] = normal.sample(&mut rng),
+                Means::Multivariate(ref mut arr) => {}
+            }
             //
             // update emission variances
             //
             //  squared deviation
+            let emission_means_state = match &self.emission_means {
+                Means::Univariate(arr) => arr[state],
+                Means::Multivariate(arr) => 0.0,
+            };
             let sq_dev_sum: f64 = obs_group_by_state
                 .iter()
-                .map(|x| (*x - self.emission_means[state]).powi(2))
+                .map(|x| (*x - emission_means_state).powi(2))
                 .sum();
             // Inverse-Gamma distribution  - division by 2.0 because arises as a conjugate prior in Bayesian inference for the variance
             let posterior_shape = nig_prior_variance_shape + count_obs / 2.0;
             let posterior_scale = nig_prior_variance_scale + 0.5 * sq_dev_sum;
             let inv_gamma = Gamma::new(posterior_shape, 1.0 / posterior_scale)?;
-            self.emission_variance[state] = 1.0 / inv_gamma.sample(&mut rng).clamp(1e-6, 1e2);
+            match self.emission_variance {
+                Covariance::Univariate(ref mut arr) => {
+                    arr[state] = 1.0 / inv_gamma.sample(&mut rng).clamp(1e-6, 1e2)
+                }
+                Covariance::Multivariate(ref mut arr) => {}
+            };
         }
 
         Ok(())
@@ -269,62 +329,70 @@ impl GibbsSampler for Hmm {
 }
 
 impl AnalyticsEngine for Hmm {
-    fn anomaly_scores(&self, test_data: &DataFrame) -> anyhow::Result<Vec<(String, f64, f64)>> {
+    fn anomaly_scores(
+        &self,
+        test_data: &DataFrame,
+        threshold: f64,
+    ) -> anyhow::Result<Vec<(String, f64, f64)>> {
+        const MIN_PROB: f64 = 1e-300;
         let mut scores: Vec<(String, f64, f64)> = Vec::new();
         let columns = test_data.get_columns();
         let timestamps = columns[0].clone();
         let timestamps = timestamps.str().unwrap();
         let observations = columns[1].clone();
         let observations = observations.f64().unwrap();
+
         for (i, (time, data)) in timestamps.iter().zip(observations.iter()).enumerate() {
             let time = time.unwrap();
             let data = data.unwrap();
-            let data_log = data.ln();
-            let log_likelihoods: Vec<f64> = self
-                .emission_means
-                .iter()
-                .zip(self.emission_variance.iter())
-                .map(|(&mu, &var)| {
-                    let std = var.sqrt().max(1e-6);
-                    let dist = StatNormal::new(mu, std).unwrap();
-                    dist.ln_pdf(data_log)
-                })
-                .collect();
+            let data_log = data.max(MIN_PROB).ln();
+            match (self.emission_means.clone(), self.emission_variance.clone()) {
+                (Means::Univariate(means_arr), Covariance::Univariate(cov_arr)) => {
+                    let log_likelihoods: Vec<f64> = means_arr
+                        .iter()
+                        .zip(cov_arr.iter())
+                        .map(|(&mu, &var)| {
+                            let std = var.sqrt().max(1e-6);
+                            let dist = StatNormal::new(mu, std).unwrap();
+                            dist.ln_pdf(data_log)
+                        })
+                        .collect();
 
-            let score = -log_likelihoods
-                .iter()
-                .copied()
-                .fold(f64::NEG_INFINITY, f64::max);
-            // - A low score (e.g. -0.64) → normal
-            // - A higher score (e.g. closer to 0) → possibly anomalous
-            // - a score like -0.05 or higher = a rare point = more anomalous
-            // println!(
-            //     "{:?} {:.2}, log = {:.2}, log_likes = {:?}, score = {:.2}",
-            //     time, data, data_log, log_likelihoods, score
-            // );
-            scores.push((time.to_string(), data, score));
+                    let score = -log_likelihoods
+                        .iter()
+                        .copied()
+                        .fold(f64::NEG_INFINITY, f64::max);
+                    // - A low score (e.g. -0.64) → normal
+                    // - A higher score (e.g. closer to 0) → possibly anomalous
+                    // - a score like -0.05 or higher = a rare point = more anomalous
+                    // println!(
+                    //     "{:?} {:.2}, log = {:.2}, log_likes = {:?}, score = {:.2}",
+                    //     time, data, data_log, log_likelihoods, score
+                    // );
+                    scores.push((time.to_string(), data, score));
+                }
+                (Means::Multivariate(means_arr), Covariance::Multivariate(cov_arr)) => {}
+                (_, _) => {}
+            };
         }
 
-        let threshold_warn = 5.0;
-        let threshold_crit = 8.0;
-
         for (i, (time, data, score)) in scores.iter().enumerate() {
-            if *score > threshold_warn {
+            if *score > threshold {
                 println!(
                     "Anomaly at {}: data = {:.2}, score = {:.2}",
                     time, data, score
                 );
             }
         }
-
-        for (i, (time, data, score)) in scores.iter().enumerate() {
-            if *score > threshold_crit {
-                println!(
-                    "Anomaly at {}: data = {:.2}, score = {:.2}",
-                    time, data, score
-                );
-            }
-        }
+        //
+        // for (i, (time, data, score)) in scores.iter().enumerate() {
+        //     if *score > threshold_crit {
+        //         println!(
+        //             "Anomaly at {}: data = {:.2}, score = {:.2}",
+        //             time, data, score
+        //         );
+        //     }
+        // }
         Ok(scores)
     }
 }

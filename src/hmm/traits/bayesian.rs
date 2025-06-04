@@ -30,5 +30,9 @@ pub trait Bayesian: GibbsSampler {
 }
 
 pub trait AnalyticsEngine {
-    fn anomaly_scores(&self, test_data: &DataFrame) -> anyhow::Result<Vec<(String, f64, f64)>>;
+    fn anomaly_scores(
+        &self,
+        test_data: &DataFrame,
+        threshold: f64,
+    ) -> anyhow::Result<Vec<(String, f64, f64)>>;
 }

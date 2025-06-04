@@ -1,9 +1,13 @@
 use crate::plot_anomalies;
 use crate::{AnalyticsEngine, Hmm};
+use anyhow::anyhow;
+use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 use ndarray::Array2;
-use polars::frame::DataFrame;
+use polars::df;
+use polars::{prelude::*, series::IsSorted};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::hash::BuildHasherDefault;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -30,10 +34,10 @@ pub enum ServerCommand {
         data: DataFrame,
         threshold: f64,
     },
-    // CorrelateAnomalies {
-    //     model_names: Vec<String>,
-    //     data: Vec<Vec<f64>>,
-    // },
+    CorrelateAnomalies {
+        model_names: Vec<String>,
+        data: Vec<DataFrame>,
+    },
     // GetModelInfo {
     //     name: String,
     // },
@@ -108,6 +112,17 @@ impl HmmServer {
                     // Convert to ndarray format
                     // TODO: Change unwrap()
                     let observations = data.column(&field).unwrap().f64().unwrap();
+                    let mean = observations
+                        .mean()
+                        .ok_or(anyhow!("Calculating Sample mean failed!"))?;
+                    // ddof=0 provides a maximum likelihood estimate
+                    let ddof = 0;
+                    let std = observations
+                        .std(ddof)
+                        .ok_or(anyhow!("Calculating std failed"))?;
+                    let variance = std * std;
+                    let shape = (mean * mean) / variance;
+                    let scale = variance / mean;
                     let observations: Vec<f64> = observations.into_no_null_iter().collect();
                     let observations =
                         Array2::from_shape_vec((observations.len(), 1), observations)?;
@@ -118,14 +133,16 @@ impl HmmServer {
                     // TODO: Make it a command line input parameter
                     // No of iterations in the gibbs_sampling
                     const NUM_ITER: usize = 1000;
-                    const BURN_IN: usize = 50;
+                    const BURN_IN: usize = 500;
 
                     // Initialise HMM
-                    let mut hmm = Hmm::new(n_features, n_states);
+                    let mut hmm = Hmm::new(n_features, n_states, mean, variance, shape, scale);
 
                     // Train HMM - Gibbs Sampling
-                    hmm.learn_gibbs_sampling(&observations, NUM_ITER, BURN_IN)
-                        .unwrap(); // Add proper error handling
+                    match hmm.learn_gibbs_sampling(&observations, NUM_ITER, BURN_IN) {
+                        Ok(_) => {}
+                        Err(e) => eprintln!("{:?}", e),
+                    };
 
                     // Store model
                     let mut models = self.models.lock().await;
@@ -150,7 +167,16 @@ impl HmmServer {
                 let models = self.models.lock().await;
                 if let Some(model) = models.get(&model_name) {
                     // Find anomalies
-                    let scores = model.anomaly_scores(&data)?;
+                    let scores = match model.anomaly_scores(&data, threshold) {
+                        Ok(scores) => scores,
+                        Err(e) => {
+                            eprintln!("err: {:?}", e);
+                            return Ok(ServerResponse::Error(format!(
+                                "Anomaly scores calculations failed using model '{}'",
+                                model_name
+                            )));
+                        }
+                    };
                     plot_anomalies(&scores, threshold)?;
                     let anomalies: Vec<_> = scores
                         .iter()
@@ -166,41 +192,13 @@ impl HmmServer {
                         model_name
                     )))
                 }
-            } // ServerCommand::CorrelateAnomalies { model_names, data } => {
-              //     let models = self.models.lock().await;
-              //     let mut results = Vec::new();
-              //
-              //     for model_name in model_names {
-              //         if let Some(model) = models.get(&model_name) {
-              //             // Convert data to ndarray
-              //             let obs = data.len();
-              //             let features = data[0].len();
-              //             let mut observations = Array2::zeros((obs, features));
-              //
-              //             for (i, row) in data.iter().enumerate() {
-              //                 for (j, &val) in row.iter().enumerate() {
-              //                     observations[[i, j]] = val;
-              //                 }
-              //             }
-              //
-              //             // Find anomalies (using default threshold for correlation)
-              //             let scores = model.anomaly_scores(&observations);
-              //             let threshold =
-              //                 scores.iter().fold(0.0, |acc, &x| acc + x) / scores.len() as f64 + 2.0;
-              //             let anomalies: Vec<_> = scores
-              //                 .iter()
-              //                 .enumerate()
-              //                 .filter(|(_, &score)| score > threshold)
-              //                 .map(|(i, _)| i)
-              //                 .collect();
-              //
-              //             results.push((model_name, anomalies));
-              //         }
-              //     }
-              //
-              //     ServerResponse::CorrelationResults(results)
-              // }
-              // ServerCommand::GetModelInfo { name } => {
+            }
+            ServerCommand::CorrelateAnomalies { model_names, data } => {
+                let mut results = Vec::new();
+
+                align_events_windows(data).await?;
+                Ok(ServerResponse::CorrelationResults(results))
+            } // ServerCommand::GetModelInfo { name } => {
               //     let models = self.models.lock().await;
               //     if let Some(model) = models.get(&name) {
               //         ServerResponse::ModelInfo(format!("{:?}", model))
@@ -216,4 +214,64 @@ impl Default for HmmServer {
     fn default() -> Self {
         Self::new()
     }
+}
+
+async fn align_events_windows(data: Vec<DataFrame>) -> anyhow::Result<()> {
+    let mut data_lazy = Vec::new();
+    for (i, d) in data.iter().enumerate() {
+        let mut d = d.clone();
+        data_lazy.push(d.lazy());
+    }
+
+    let time_options = StrptimeOptions {
+        format: Some("%Y/%m/%d %H:%M:%S".into()),
+        ..Default::default()
+    };
+
+    // // 2. Sort by Time column
+    // combined_df = combined_df.sort(
+    //     ["Time"],
+    //     SortMultipleOptions::new().with_order_descending(true),
+    // );
+    //
+    let mut combined = data_lazy[0].clone();
+    for lz in data_lazy.iter().skip(1) {
+        combined = combined.join(
+            lz.clone(),
+            [col("Time")],
+            [col("Time")],
+            JoinArgs::new(JoinType::Inner),
+        );
+    }
+    let combined = combined
+        .sort(
+            ["Time"],
+            SortMultipleOptions {
+                descending: vec![false],
+                nulls_last: vec![false],
+                ..Default::default()
+            },
+        )
+        .collect()?;
+    println!("{:?}", combined);
+    // let aggregated = combined_df
+    //     .lazy()
+    //     .group_by_dynamic(col("Time"), [], window_options)
+    //     .agg([
+    //         // Mean calculations for all numeric columns
+    //         col("CPUUtilization").mean().alias("CPUUtilization_mean"),
+    //         col("CPUUtilization").std(0).alias("CPUUtilization_std"),
+    //         col("DiskQueueDepth").mean().alias("DiskQueueDepth_mean"),
+    //         col("DiskQueueDepth").std(0).alias("DiskQueueDepth_std"),
+    //         col("CommitLatency").mean().alias("CommitLatency_mean"),
+    //         col("CommitLatency").std(0).alias("CommitLatency_std"),
+    //         // Add variance (std squared)
+    //         (col("CPUUtilization").std(0) * col("CPUUtilization").std(0))
+    //             .alias("CPUUtilization_var"),
+    //         (col("DiskQueueDepth").std(0) * col("DiskQueueDepth").std(0))
+    //             .alias("DiskQueueDepth_var"),
+    //         (col("CommitLatency").std(0) * col("Value1").std(0)).alias("CommitLatency_var"),
+    //     ])
+    //     .collect()?;
+    Ok(())
 }

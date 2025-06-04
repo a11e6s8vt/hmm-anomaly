@@ -105,7 +105,9 @@ pub async fn read_input_data(path: &StdPath) -> anyhow::Result<DataFrame> {
         .try_into_reader_with_file_path(Some(path.to_path_buf()))?
         .finish()?;
 
-    Ok(df)
+    let cleaned_df = df.drop_nulls::<String>(None)?;
+
+    Ok(cleaned_df)
 }
 
 pub fn plot_anomalies(scores: &[(String, f64, f64)], score_threshold: f64) -> anyhow::Result<()> {

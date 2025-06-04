@@ -2,8 +2,10 @@ use clap::{Parser, Subcommand};
 use csv::Reader;
 use hmm_anomaly::{is_csv_by_content, read_input_data, ServerCommand, ServerResponse};
 use ndarray::Array2;
+use polars::frame::DataFrame;
 use serde_json;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -64,16 +66,16 @@ enum Commands {
         /// Anomaly threshold
         threshold: f64,
     },
-    /*
+
     /// Correlate anomalies across multiple models
     CorrelateAnomalies {
         /// Comma-separated list of model names
         models: String,
 
-        /// Path to CSV file with data to analyze
-        file: PathBuf,
+        /// Comma-separated list of paths to CSV files with data to analyze
+        files: String,
     },
-
+    /*
     /// Get information about a model
     ModelInfo {
         /// Model name
@@ -137,13 +139,22 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 eprintln!("Only CSV files are supported");
             }
+        }
+        Commands::CorrelateAnomalies { models, files } => {
+            let mut data: Vec<DataFrame> = Vec::new();
+            let file_paths = files
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .collect::<Vec<String>>();
+            for file in file_paths {
+                let p = PathBuf::from_str(file.as_str())?;
+                let test_data = read_input_data(&p).await?;
+                data.push(test_data);
+            }
+            let model_names = models.split(',').map(|s| s.trim().to_string()).collect();
+            let cmd = ServerCommand::CorrelateAnomalies { model_names, data };
+            send_command(&mut stream, cmd).await?;
         } /*
-          Commands::CorrelateAnomalies { models, file } => {
-              let data = read_csv_file(&file)?;
-              let model_names = models.split(',').map(|s| s.trim().to_string()).collect();
-              let cmd = ServerCommand::CorrelateAnomalies { model_names, data };
-              send_command(&mut stream, cmd).await?;
-          }
           Commands::ModelInfo { name } => {
               let cmd = ServerCommand::GetModelInfo { name };
               send_command(&mut stream, cmd).await?;
