@@ -271,9 +271,9 @@ impl GibbsSampler for Hmm {
          */
 
         let mut rng = rand::rng();
-        let nig_prior_mean = 0.0;
-        let nig_prior_variance_scale = 20.0;
-        let nig_prior_variance_shape = 1.0;
+        let prior_mean = 0.0;
+        let prior_variance_scale = 2.0;
+        let prior_variance_shape = 2.0;
 
         // Group observations by state {0: Normal, 1: Warn, 2: Critical}
         for state in 0..self.n_states {
@@ -291,10 +291,13 @@ impl GibbsSampler for Hmm {
 
             // update emission means
             let count_obs = obs_group_by_state.len() as f64;
+            if count_obs == 0.0 {
+                return Ok(());
+            }
             let obs_mean: f64 = obs_group_by_state.iter().sum::<f64>() / count_obs;
-            let posterior_mean = (nig_prior_mean / nig_prior_variance_scale + obs_mean * count_obs)
-                / (1.0 / nig_prior_variance_scale + count_obs);
-            let posterior_var = 1.0 / (1.0 / nig_prior_variance_scale + count_obs);
+            let posterior_mean = (prior_mean / prior_variance_scale + obs_mean * count_obs)
+                / (1.0 / prior_variance_scale + count_obs);
+            let posterior_var = 1.0 / (1.0 / prior_variance_scale + count_obs);
             let normal = Normal::new(posterior_mean, posterior_var.sqrt())?;
             match self.emission_means {
                 Means::Univariate(ref mut arr) => arr[state] = normal.sample(&mut rng),
@@ -312,10 +315,15 @@ impl GibbsSampler for Hmm {
                 .iter()
                 .map(|x| (*x - emission_means_state).powi(2))
                 .sum();
+            // Prior hyperparameters
+            assert!(prior_variance_scale > 0.0);
+            assert!(prior_variance_shape > 0.0);
             // Inverse-Gamma distribution  - division by 2.0 because arises as a conjugate prior in Bayesian inference for the variance
-            let posterior_shape = nig_prior_variance_shape + count_obs / 2.0;
-            let posterior_scale = nig_prior_variance_scale + 0.5 * sq_dev_sum;
+            let posterior_shape = (prior_variance_shape + count_obs / 2.0).max(1e-6);
+            let posterior_scale = (prior_variance_scale + 0.5 * sq_dev_sum).max(1e-6);
+            assert!(posterior_scale > 0.0, "posterior_scale must be positive");
             let inv_gamma = Gamma::new(posterior_shape, 1.0 / posterior_scale)?;
+            println!("Hello");
             match self.emission_variance {
                 Covariance::Univariate(ref mut arr) => {
                     arr[state] = 1.0 / inv_gamma.sample(&mut rng).clamp(1e-6, 1e2)

@@ -40,3 +40,7 @@
 # DiskQueueDepth
 ./target/debug/client find-anomalies disk_queue_model ../dataset/testing/DiskQueueDepth.csv 1.0
 ```
+
+### Notes
+
+1. DiskQueueDepth values range between 0 and 3. It is often zero. We need to use Zero-Inflated models such as ZIG to handle such data
