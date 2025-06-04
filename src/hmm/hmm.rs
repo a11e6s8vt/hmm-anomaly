@@ -1,12 +1,13 @@
+//
+// TODO: ZIG (Zero-Inflated Gamma) for handling mostly zero observations
+// with positve continuous values
+//
 use crate::traits::{AnalyticsEngine, Bayesian, GibbsSampler};
 use crate::utils::{log_sum_exp, normalize_log_probs};
-use crate::{
-    censored_gamma_samples, normal_samples_above_1, shifted_lognormal, truncated_normal_above_1,
-};
-use ndarray::{array, Array1, Array2, Array3, Axis};
+use crate::{censored_gamma_samples, shifted_lognormal};
+use ndarray::{Array1, Array2, Array3, Axis};
 use polars::frame::DataFrame;
-use polars::prelude::NestedType;
-use rand::rng;
+
 use rand_distr::{Dirichlet, Distribution, Gamma, Normal};
 use statrs::distribution::{Continuous, Normal as StatNormal};
 
@@ -27,20 +28,18 @@ pub struct Hmm {
     // Number of states
     n_states: usize,
 
-    // Priors - π
+    // Priors for the states - π
     init_probs: Array1<f64>,
 
-    // A
+    // A:
     transition_probs: Array2<f64>,
 
-    // B (mu_k)
+    // B: (mu_k)
     emission_means: Means,
 
-    // C (sigma_k)
+    // C: (sigma_k)
     // Diagonal Covariance (Uncorrelated emissions)
     emission_variance: Covariance,
-    // z_t
-    // hidden_states: Vec<usize>,
 }
 
 impl Hmm {
@@ -63,8 +62,7 @@ impl Hmm {
             let emission_means = Array1::from(samples);
             Means::Univariate(emission_means.iter().map(|p| p.ln()).collect::<Array1<_>>())
         } else {
-            let emission_means: Array1<f64> = Array1::from_vec(vec![25.0, 25.0, 25.0]);
-            Means::Univariate(emission_means.iter().map(|p| p.ln()).collect::<Array1<_>>())
+            unimplemented!()
         };
 
         let emission_variance: Covariance = if n_features == 1 {
@@ -77,13 +75,7 @@ impl Hmm {
                     .collect::<Array1<_>>(),
             )
         } else {
-            let emission_variance: Array1<f64> = Array1::from_vec(vec![20.0, 20.0, 20.0]);
-            Covariance::Univariate(
-                emission_variance
-                    .iter()
-                    .map(|p| p.ln())
-                    .collect::<Array1<_>>(),
-            )
+            unimplemented!()
         };
 
         Self {
@@ -129,6 +121,8 @@ impl Bayesian for Hmm {
         let mut latent_states = Vec::new();
 
         println!("num_iter = {}, burn_in = {}", num_iter, burn_in);
+        // burn_in: we discard the samples until the Markov chain reaches its
+        // stationary distribution. It's the initial phase of the Gibbs Sampling
         for index in 0..num_iter {
             let states = self.sample_latent_states(observations)?;
             self.sample_transition_probs(&states);
@@ -159,6 +153,7 @@ impl GibbsSampler for Hmm {
         // Forward Step
         //
         // alpha_t(i) = probability of seeing observations x_1,...,x_t and ending at state q_t = S_i
+        // [[0, 0, 0], [0, 0, 0], ...] - for three states
         let mut alpha: Array2<f64> = Array2::zeros((n_obs, self.n_states));
 
         //
@@ -169,14 +164,19 @@ impl GibbsSampler for Hmm {
             // assuming random variable X has only a single value at time step t
             let mu = match &self.emission_means {
                 Means::Univariate(arr) => arr[k],
-                Means::Multivariate(arr) => 0.0,
+                Means::Multivariate(_) => {
+                    unimplemented!()
+                }
             };
             let sigma = match &self.emission_variance {
                 Covariance::Univariate(arr) => arr[k],
-                Covariance::Multivariate(arr) => 0.0,
+                Covariance::Multivariate(_) => {
+                    unimplemented!()
+                }
             };
             let normal = StatNormal::new(mu, sigma.sqrt())?;
             let log_likelihood = normal.ln_pdf(row[0]);
+            // log(a.b) = log(a) + log(b)
             alpha[[0, k]] = self.init_probs[k] + log_likelihood;
         }
 
@@ -196,11 +196,15 @@ impl GibbsSampler for Hmm {
                 let row = observations.row(t);
                 let mu = match &self.emission_means {
                     Means::Univariate(arr) => arr[k],
-                    Means::Multivariate(arr) => 0.0,
+                    Means::Multivariate(_arr) => {
+                        unimplemented!()
+                    }
                 };
                 let sigma = match &self.emission_variance {
                     Covariance::Univariate(arr) => arr[k],
-                    Covariance::Multivariate(arr) => 0.0,
+                    Covariance::Multivariate(_arr) => {
+                        unimplemented!()
+                    }
                 };
                 let normal = StatNormal::new(mu, sigma.sqrt())?;
                 let log_likelihood = normal.ln_pdf(row[0]); // assuming random variable X has only a
@@ -214,9 +218,6 @@ impl GibbsSampler for Hmm {
             }
 
             // Normalise alpha
-            // let row_sum = alpha.row(t).sum();
-            // let mut row = alpha.row_mut(t);
-            // row.mapv_inplace(|x| x / row_sum);
             let row = alpha.row(t);
             let row = normalize_log_probs(&row.to_owned());
             alpha.index_axis_mut(Axis(0), t).assign(&row);
@@ -272,7 +273,7 @@ impl GibbsSampler for Hmm {
 
         let mut rng = rand::rng();
         let prior_mean = 0.0;
-        let prior_variance_scale = 2.0;
+        let prior_variance_scale = 20.0;
         let prior_variance_shape = 2.0;
 
         // Group observations by state {0: Normal, 1: Warn, 2: Critical}
@@ -301,7 +302,9 @@ impl GibbsSampler for Hmm {
             let normal = Normal::new(posterior_mean, posterior_var.sqrt())?;
             match self.emission_means {
                 Means::Univariate(ref mut arr) => arr[state] = normal.sample(&mut rng),
-                Means::Multivariate(ref mut arr) => {}
+                Means::Multivariate(ref mut arr) => {
+                    unimplemented!()
+                }
             }
             //
             // update emission variances
@@ -309,7 +312,9 @@ impl GibbsSampler for Hmm {
             //  squared deviation
             let emission_means_state = match &self.emission_means {
                 Means::Univariate(arr) => arr[state],
-                Means::Multivariate(arr) => 0.0,
+                Means::Multivariate(arr) => {
+                    unimplemented!()
+                }
             };
             let sq_dev_sum: f64 = obs_group_by_state
                 .iter()
@@ -323,12 +328,13 @@ impl GibbsSampler for Hmm {
             let posterior_scale = (prior_variance_scale + 0.5 * sq_dev_sum).max(1e-6);
             assert!(posterior_scale > 0.0, "posterior_scale must be positive");
             let inv_gamma = Gamma::new(posterior_shape, 1.0 / posterior_scale)?;
-            println!("Hello");
             match self.emission_variance {
                 Covariance::Univariate(ref mut arr) => {
                     arr[state] = 1.0 / inv_gamma.sample(&mut rng).clamp(1e-6, 1e2)
                 }
-                Covariance::Multivariate(ref mut arr) => {}
+                Covariance::Multivariate(ref mut arr) => {
+                    unimplemented!()
+                }
             };
         }
 
@@ -371,15 +377,17 @@ impl AnalyticsEngine for Hmm {
                         .copied()
                         .fold(f64::NEG_INFINITY, f64::max);
                     // - A low score (e.g. -0.64) → normal
-                    // - A higher score (e.g. closer to 0) → possibly anomalous
-                    // - a score like -0.05 or higher = a rare point = more anomalous
+                    // - A higher score (e.g. greater than 5) → possibly anomalous
+                    // - a score like 7 or higher = a rare point = more anomalous
                     // println!(
                     //     "{:?} {:.2}, log = {:.2}, log_likes = {:?}, score = {:.2}",
                     //     time, data, data_log, log_likelihoods, score
                     // );
                     scores.push((time.to_string(), data, score));
                 }
-                (Means::Multivariate(means_arr), Covariance::Multivariate(cov_arr)) => {}
+                (Means::Multivariate(_means_arr), Covariance::Multivariate(_cov_arr)) => {
+                    unimplemented!()
+                }
                 (_, _) => {}
             };
         }
